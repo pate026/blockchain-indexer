@@ -1,0 +1,15 @@
+python virtual environment and cache
+
+.venv/
+pycache/
+*.py[cod]
+
+local SQLite database and WAL temporary files
+
+*.db
+*.db-wal
+*.db-shm
+
+editor settings
+
+.vscode/
