@@ -26,8 +26,15 @@ class IndexerTUI(App):
     }
     """
 
-    # keyboard shortcut to quit the TUI
-    BINDINGS = [("q", "quit", "quit")]
+    # keyboard shortcuts to pause live updates or quit the TUI
+    BINDINGS = [
+        ("p", "toggle_pause", "pause/resume"),
+        ("q", "quit", "quit"),
+    ]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.paused = False
 
     def compose(self) -> ComposeResult:
         # build the UI layout: header, three metric cards, event table, and footer
@@ -52,16 +59,33 @@ class IndexerTUI(App):
         await self.refresh_data()
         self.set_interval(2.0, self.refresh_data)
 
+    def action_toggle_pause(self) -> None:
+        # toggle live table updates on or off so rows can be read comfortably
+        self.paused = not self.paused
+        if self.paused:
+            self.sub_title = "PAUSED (press 'p' to resume)"
+        else:
+            self.sub_title = ""
+
     async def refresh_data(self) -> None:
+        # skip refresh while paused by the user
+        if self.paused:
+            return
+
         # query SQLite asynchronously and update widgets without blocking UI
         try:
-            last_block, total_count, total_volume, rows = await get_dashboard_data(limit=30)
+            last_block, total_count, total_volume, rows = await get_dashboard_data(limit=50)
 
             self.query_one("#card-block", Static).update(f"latest block\n{last_block:,}")
             self.query_one("#card-count", Static).update(f"indexed transfers\n{total_count:,}")
             self.query_one("#card-volume", Static).update(f"total volume\n{total_volume:,.2f} USDC")
 
             table = self.query_one("#transfers-table", DataTable)
+
+            # save current cursor and scroll position before clearing rows
+            saved_row = table.cursor_row
+            saved_scroll_y = table.scroll_y
+
             table.clear()
 
             for block_num, sender, receiver, amount, tx_hash in rows:
@@ -75,6 +99,13 @@ class IndexerTUI(App):
                     f"{amount:,.2f}",
                     short_tx,
                 )
+
+            # restore cursor and scroll position so the view does not jump to the top
+            if rows:
+                target_row = min(saved_row, len(rows) - 1)
+                table.move_cursor(row=target_row, animate=False)
+                table.scroll_to(y=saved_scroll_y, animate=False)
+
         except Exception as e:
             self.notify(f"database read error: {e}", severity="error")
 
