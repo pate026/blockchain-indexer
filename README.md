@@ -1,17 +1,16 @@
-Ethereum blockchain indexer
+# Ethereum blockchain indexer
 
 a lightweight, three-layer local blockchain indexer built with Python. it fetches EVM event logs asynchronously, stores decoded data in SQLite using WAL mode, and displays live metrics in a terminal user interface.
 
-architecture
+## architecture
 
-data ingestion (indexer.py): uses asyncio and web3.py to fetch ERC-20 Transfer logs (eth_getLogs) in adaptive batches, decodes ABI payloads, verifies chain integrity against reorgs, and tracks progress via checkpoints.
+- **data ingestion (`indexer.py`)**: uses asyncio and web3.py to fetch ERC-20 Transfer logs (`eth_getLogs`) in adaptive batches, decodes ABI payloads, verifies chain integrity against reorgs, and tracks progress via checkpoints.
+- **storage (`db.py`)**: uses aiosqlite with Write-Ahead Logging (WAL) enabled to allow simultaneous writes from the indexer and reads from the UI without database locks.
+- **user interface (`tui.py`)**: a Textual terminal dashboard that polls the database independently to display live block progress, volume metrics, and recent transfers.
 
-storage (db.py): uses aiosqlite with Write-Ahead Logging (WAL) enabled to allow simultaneous writes from the indexer and reads from the UI without database locks.
+## quick start
 
-user interface (tui.py): a Textual terminal dashboard that polls the database independently to display live block progress, volume metrics, and recent transfers.
-
-quick start
-
+```bash
 # create and activate virtual environment
 python3 -m venv .venv
 source .venv/bin/activate
@@ -24,3 +23,16 @@ python indexer.py
 
 # run the live terminal dashboard in terminal 2
 python tui.py
+```
+
+## running tests
+
+the tests use a temporary SQLite file and fake chains, so they need no network access.
+
+```bash
+# install runtime and test dependencies
+pip install -r requirements-dev.txt
+
+# run the test suite
+pytest -q
+```

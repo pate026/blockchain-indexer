@@ -1,6 +1,7 @@
 import asyncio
 from web3 import AsyncHTTPProvider, AsyncWeb3
-from db import get_checkpoint, init_db, rollback_block, save_batch
+from db import TransferRow, get_block_hash, get_checkpoint, init_db, rollback_to, save_batch
+from reorg import ReorgError, find_common_ancestor
 
 # free public Ethereum RPC endpoint for testing without an API key
 RPC_URL = "https://ethereum-rpc.publicnode.com"
@@ -26,6 +27,9 @@ ERC20_ABI = [
 INITIAL_BATCH_SIZE = 5
 MAX_BATCH_SIZE = 25
 POLL_INTERVAL_SECONDS = 4
+
+# deepest chain reorg we are willing to roll back automatically
+MAX_REORG_DEPTH = 64
 
 
 async def main() -> None:
@@ -76,17 +80,41 @@ async def main() -> None:
             to_block = min(from_block + batch_size - 1, chain_head)
 
             try:
-                # reorg check: verify that from_block points to our last known block hash
-                if last_block_hash is not None:
-                    first_block_data = await w3.eth.get_block(from_block)
-                    parent_hash = first_block_data["parentHash"].hex()
+                # fetch every block header in the batch to get their hashes
+                headers = await asyncio.gather(
+                    *(w3.eth.get_block(n) for n in range(from_block, to_block + 1))
+                )
+                block_hashes: list[tuple[int, str]] = [
+                    (int(h["number"]), w3.to_hex(h["hash"])) for h in headers
+                ]
 
-                    if parent_hash != last_block_hash:
-                        print(f"chain reorg detected at block {from_block}! stepping back...")
-                        await rollback_block(last_indexed_block)
-                        last_indexed_block -= 1
-                        last_block_hash = None
-                        continue
+                # reorg check: from_block must build on our last stored block hash
+                first_parent_hash = w3.to_hex(headers[0]["parentHash"])
+                if last_block_hash is not None and first_parent_hash != last_block_hash:
+                    print(f"chain reorg detected at block {from_block}! searching for common ancestor...")
+
+                    async def get_chain_hash(block_number: int) -> str:
+                        block = await w3.eth.get_block(block_number)
+                        return w3.to_hex(block["hash"])
+
+                    ancestor = await find_common_ancestor(
+                        last_indexed_block, get_chain_hash, get_block_hash, MAX_REORG_DEPTH
+                    )
+                    await rollback_to(ancestor + 1)
+                    last_indexed_block = ancestor
+                    last_block_hash = await get_block_hash(ancestor)
+                    print(f"rolled back to common ancestor block {ancestor}, re-indexing from {ancestor + 1}")
+                    continue
+
+                # headers fetched concurrently must form one chain, else a reorg hit mid-fetch
+                is_linked = all(
+                    w3.to_hex(headers[i]["parentHash"]) == block_hashes[i - 1][1]
+                    for i in range(1, len(headers))
+                )
+                if not is_linked:
+                    print(f"block headers {from_block}..{to_block} are not linked, retrying...")
+                    await asyncio.sleep(1)
+                    continue
 
                 # fetch only Transfer event logs using the topic filter
                 logs = await w3.eth.get_logs(
@@ -98,12 +126,22 @@ async def main() -> None:
                     }
                 )
 
+                # every log must come from the same block we fetched the header for
+                hash_by_block = dict(block_hashes)
+                mismatched = [
+                    log for log in logs
+                    if hash_by_block.get(int(log["blockNumber"])) != w3.to_hex(log["blockHash"])
+                ]
+                if mismatched:
+                    print(f"log block hashes do not match headers in {from_block}..{to_block}, retrying...")
+                    await asyncio.sleep(1)
+                    continue
+
                 # decode each raw log and prepare rows for SQLite insertion
-                decoded_transfers: list[tuple[str, int, int, str, str, float]] = []
+                decoded_transfers: list[TransferRow] = []
                 for log in logs:
                     decoded = contract.events.Transfer().process_log(log)
                     args = decoded["args"]
-                    amount = float(args["value"] / 10**6)  # USDC has 6 decimals
                     decoded_transfers.append(
                         (
                             w3.to_hex(log["transactionHash"]),
@@ -111,23 +149,26 @@ async def main() -> None:
                             int(log["blockNumber"]),
                             str(args["from"]),
                             str(args["to"]),
-                            amount,
+                            str(args["value"]),  # raw uint256 as exact decimal string
                         )
                     )
 
-                # fetch the hash of to_block and save batch atomically to SQLite
-                end_block_data = await w3.eth.get_block(to_block)
-                new_block_hash = end_block_data["hash"].hex()
-                await save_batch(decoded_transfers, to_block, new_block_hash)
+                # save transfers, block hashes and checkpoint atomically to SQLite
+                await save_batch(decoded_transfers, block_hashes)
 
-                last_block_hash = new_block_hash
-                last_indexed_block = to_block
+                last_indexed_block, last_block_hash = block_hashes[-1]
 
                 print(f"saved blocks {from_block}..{to_block} ({len(decoded_transfers)} transfers, batch={batch_size})")
 
                 # gradually increase batch size after successful requests
                 if batch_size < MAX_BATCH_SIZE:
                     batch_size = min(MAX_BATCH_SIZE, batch_size + 2)
+
+            except ReorgError as reorg_error:
+                # too deep to repair automatically: stop instead of indexing a wrong chain
+                print(f"fatal: {reorg_error}. max reorg depth is {MAX_REORG_DEPTH} blocks.")
+                print("stopping indexer. inspect the chain and the database before restarting.")
+                return
 
             except Exception as batch_error:
                 # adaptive backoff: shrink batch size if RPC node rejects large queries

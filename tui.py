@@ -1,8 +1,19 @@
 import asyncio
+from decimal import Decimal, localcontext
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal
 from textual.widgets import DataTable, Footer, Header, Static
 from db import get_dashboard_data, init_db
+
+# USDC token decimals (raw amounts are stored in the smallest unit)
+USDC_DECIMALS = 6
+
+
+def format_usdc(raw: int) -> str:
+    # convert raw units to USDC with exact decimal math, 2 decimals and thousands separator
+    with localcontext() as ctx:
+        ctx.prec = 100  # enough digits for any uint256 value
+        return f"{Decimal(raw) / Decimal(10**USDC_DECIMALS):,.2f}"
 
 
 class IndexerTUI(App):
@@ -78,7 +89,7 @@ class IndexerTUI(App):
 
             self.query_one("#card-block", Static).update(f"latest block\n{last_block:,}")
             self.query_one("#card-count", Static).update(f"indexed transfers\n{total_count:,}")
-            self.query_one("#card-volume", Static).update(f"total volume\n{total_volume:,.2f} USDC")
+            self.query_one("#card-volume", Static).update(f"total volume\n{format_usdc(total_volume)} USDC")
 
             table = self.query_one("#transfers-table", DataTable)
 
@@ -96,7 +107,7 @@ class IndexerTUI(App):
                     str(block_num),
                     short_from,
                     short_to,
-                    f"{amount:,.2f}",
+                    format_usdc(amount),
                     short_tx,
                 )
 

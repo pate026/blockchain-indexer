@@ -1,15 +1,16 @@
-python virtual environment and cache
-
+# python virtual environment and cache
 .venv/
-pycache/
+__pycache__/
 *.py[cod]
+.pytest_cache/
 
-local SQLite database and WAL temporary files
-
+# local SQLite database and WAL temporary files
+indexer.db
+indexer.db-wal
+indexer.db-shm
 *.db
 *.db-wal
 *.db-shm
 
-editor settings
-
+# editor settings
 .vscode/
