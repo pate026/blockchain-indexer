@@ -1,5 +1,6 @@
 import asyncio
 from web3 import AsyncHTTPProvider, AsyncWeb3
+from block_range import next_range
 from db import TransferRow, get_block_hash, get_checkpoint, init_db, rollback_to, save_batch
 from reorg import ReorgError, find_common_ancestor
 
@@ -27,6 +28,10 @@ ERC20_ABI = [
 INITIAL_BATCH_SIZE = 5
 MAX_BATCH_SIZE = 25
 POLL_INTERVAL_SECONDS = 4
+
+# stay this many blocks behind the tip: a load-balanced RPC may route get_logs
+# to a lagging node that returns empty logs for blocks it does not have yet
+CONFIRMATIONS = 3
 
 # deepest chain reorg we are willing to roll back automatically
 MAX_REORG_DEPTH = 64
@@ -58,10 +63,10 @@ async def main() -> None:
         contract = w3.eth.contract(address=checksum_address, abi=ERC20_ABI)
         transfer_topic = w3.to_hex(w3.keccak(text="Transfer(address,address,uint256)"))
 
-        # resume from checkpoint or start a few blocks behind chain head
+        # resume from checkpoint or start a few blocks behind the safe head
         chain_head = await w3.eth.block_number
         if last_indexed_block is None:
-            last_indexed_block = chain_head - 5
+            last_indexed_block = chain_head - CONFIRMATIONS - 5
             print(f"connected to Ethereum. starting fresh from block {last_indexed_block + 1}...")
         else:
             print(f"connected to Ethereum. resuming from checkpoint block {last_indexed_block + 1}...")
@@ -70,14 +75,15 @@ async def main() -> None:
         while True:
             chain_head = await w3.eth.block_number
 
-            # wait if we are already caught up with the latest block
-            if last_indexed_block >= chain_head:
+            # calculate target block range using current adaptive batch size
+            block_range = next_range(last_indexed_block, chain_head, batch_size, CONFIRMATIONS)
+
+            # wait if we are already caught up with the safe head
+            if block_range is None:
                 await asyncio.sleep(POLL_INTERVAL_SECONDS)
                 continue
 
-            # calculate target block range using current adaptive batch size
-            from_block = last_indexed_block + 1
-            to_block = min(from_block + batch_size - 1, chain_head)
+            from_block, to_block = block_range
 
             try:
                 # fetch every block header in the batch to get their hashes

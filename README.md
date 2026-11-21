@@ -4,7 +4,7 @@ a lightweight, three-layer local blockchain indexer built with Python. it fetche
 
 ## architecture
 
-- **data ingestion (`indexer.py`)**: uses asyncio and web3.py to fetch ERC-20 Transfer logs (`eth_getLogs`) in adaptive batches, decodes ABI payloads, verifies chain integrity against reorgs, and tracks progress via checkpoints.
+- **data ingestion (`indexer.py`)**: uses asyncio and web3.py to fetch ERC-20 Transfer logs (`eth_getLogs`) in adaptive batches, decodes ABI payloads, verifies chain integrity against reorgs, and tracks progress via checkpoints. it stays `CONFIRMATIONS` blocks behind the chain tip so a lagging RPC node cannot return empty logs for blocks it does not have yet, and on a reorg it uses `reorg.py` to search for the common ancestor and roll back to it.
 - **storage (`db.py`)**: uses aiosqlite with Write-Ahead Logging (WAL) enabled to allow simultaneous writes from the indexer and reads from the UI without database locks.
 - **user interface (`tui.py`)**: a Textual terminal dashboard that polls the database independently to display live block progress, volume metrics, and recent transfers.
 
