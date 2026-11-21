@@ -14,3 +14,6 @@ indexer.db-shm
 
 # editor settings
 .vscode/
+
+# runtime logs
+*.log
