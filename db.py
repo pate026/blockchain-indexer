@@ -67,7 +67,58 @@ async def init_db() -> None:
             );
             """
         )
+
+        # store running totals so the dashboard never scans the transfers table
+        # total_volume is a decimal string of raw units (the sum can exceed int64)
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS stats (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                total_count INTEGER NOT NULL,
+                total_volume TEXT NOT NULL
+            );
+            """
+        )
         await db.commit()
+
+        # backfill totals once for existing databases; the write lock makes this
+        # safe when the indexer and the tui start at the same time
+        await db.execute("BEGIN IMMEDIATE;")
+        async with db.execute("SELECT 1 FROM stats WHERE id = 1;") as cursor:
+            has_stats = await cursor.fetchone() is not None
+        if not has_stats:
+            total_count = 0
+            total_volume = 0
+            async with db.execute("SELECT amount_raw FROM transfers;") as cursor:
+                async for (amount_raw,) in cursor:
+                    total_count += 1
+                    total_volume += int(amount_raw)
+            await db.execute(
+                "INSERT INTO stats (id, total_count, total_volume) VALUES (1, ?, ?);",
+                (total_count, str(total_volume)),
+            )
+        await db.commit()
+
+
+async def _add_stats(db: aiosqlite.Connection, count: int, volume: int) -> None:
+    # add a delta to the running totals; call inside an open write transaction
+    # volume arithmetic is done in python with exact ints, never in SQL
+    async with db.execute(
+        "SELECT total_count, total_volume FROM stats WHERE id = 1;"
+    ) as cursor:
+        row = await cursor.fetchone()
+    total_count = int(row[0]) if row else 0
+    total_volume = int(row[1]) if row else 0
+    await db.execute(
+        """
+        INSERT INTO stats (id, total_count, total_volume)
+        VALUES (1, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            total_count = excluded.total_count,
+            total_volume = excluded.total_volume;
+        """,
+        (total_count + count, str(total_volume + volume)),
+    )
 
 
 async def get_checkpoint() -> tuple[int, str] | None:
@@ -104,15 +155,25 @@ async def save_batch(
 
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("PRAGMA journal_mode=WAL;")
-        await db.execute("BEGIN;")
-        await db.executemany(
-            """
-            INSERT OR IGNORE INTO transfers
-            (tx_hash, log_index, block_number, from_address, to_address, amount_raw)
-            VALUES (?, ?, ?, ?, ?, ?);
-            """,
-            transfers,
-        )
+        await db.execute("BEGIN IMMEDIATE;")
+
+        # insert one by one so only rows that were actually inserted are counted
+        inserted_count = 0
+        inserted_volume = 0
+        for row in transfers:
+            async with db.execute(
+                """
+                INSERT OR IGNORE INTO transfers
+                (tx_hash, log_index, block_number, from_address, to_address, amount_raw)
+                VALUES (?, ?, ?, ?, ?, ?);
+                """,
+                row,
+            ) as cursor:
+                if cursor.rowcount == 1:
+                    inserted_count += 1
+                    inserted_volume += int(row[5])
+        await _add_stats(db, inserted_count, inserted_volume)
+
         await db.executemany(
             "INSERT OR REPLACE INTO blocks (block_number, block_hash) VALUES (?, ?);",
             block_hashes,
@@ -134,7 +195,20 @@ async def rollback_to(fork_block: int) -> None:
     # atomically drop all data from fork_block upwards and move the checkpoint back
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("PRAGMA journal_mode=WAL;")
-        await db.execute("BEGIN;")
+        await db.execute("BEGIN IMMEDIATE;")
+
+        # subtract the rows about to be deleted from the running totals
+        removed_count = 0
+        removed_volume = 0
+        async with db.execute(
+            "SELECT amount_raw FROM transfers WHERE block_number >= ?;",
+            (fork_block,),
+        ) as cursor:
+            async for (amount_raw,) in cursor:
+                removed_count += 1
+                removed_volume += int(amount_raw)
+        await _add_stats(db, -removed_count, -removed_volume)
+
         await db.execute(
             "DELETE FROM transfers WHERE block_number >= ?;",
             (fork_block,),
@@ -181,13 +255,13 @@ async def get_dashboard_data(
             cp_row = await cursor.fetchone()
             last_block = int(cp_row[0]) if cp_row else 0
 
-        # sum volume in python with exact ints (SQL SUM would overflow or use floats)
-        total_count = 0
-        total_volume = 0
-        async with db.execute("SELECT amount_raw FROM transfers;") as cursor:
-            async for (amount_raw,) in cursor:
-                total_count += 1
-                total_volume += int(amount_raw)
+        # read running totals instead of scanning every transfer
+        async with db.execute(
+            "SELECT total_count, total_volume FROM stats WHERE id = 1;"
+        ) as cursor:
+            stats_row = await cursor.fetchone()
+            total_count = int(stats_row[0]) if stats_row else 0
+            total_volume = int(stats_row[1]) if stats_row else 0
 
         # fetch the most recent transfers ordered by newest first
         async with db.execute(
