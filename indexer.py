@@ -1,11 +1,12 @@
 import asyncio
+import os
 from web3 import AsyncHTTPProvider, AsyncWeb3
 from block_range import next_range
 from db import TransferRow, get_block_hash, get_checkpoint, init_db, rollback_to, save_batch
 from reorg import ReorgError, find_common_ancestor
 
-# free public Ethereum RPC endpoint for testing without an API key
-RPC_URL = "https://ethereum-rpc.publicnode.com"
+# free public RPC that also serves older logs; override with RPC_URL env var
+RPC_URL = os.environ.get("RPC_URL", "https://eth.drpc.org")
 
 # USDC token contract address on Ethereum mainnet
 CONTRACT_ADDRESS = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
@@ -44,7 +45,7 @@ async def main() -> None:
     await init_db()
 
     # initialize asynchronous Web3 client
-    w3 = AsyncWeb3(AsyncHTTPProvider(RPC_URL))
+    w3 = AsyncWeb3(AsyncHTTPProvider(RPC_URL, request_kwargs={"headers": {"User-Agent": "Mozilla/5.0"}}))
 
     # load saved checkpoint from database if one exists
     checkpoint = await get_checkpoint()
